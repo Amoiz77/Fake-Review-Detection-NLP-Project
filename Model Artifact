@@ -1,0 +1,5 @@
+import joblib
+
+joblib.dump(model, "model.pkl")
+joblib.dump(tfidf_word, "tfidf_word.pkl")
+joblib.dump(tfidf_char, "tfidf_char.pkl")
