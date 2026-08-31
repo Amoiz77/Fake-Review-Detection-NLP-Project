@@ -1,14 +1,20 @@
-import pandas as pd
+import joblib
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import re
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from scipy.sparse import hstack
 import scipy.sparse as sp
+import seaborn as sns
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
 
-data = pd.read_csv("/content/fakereviewsdataset.csv")
+# -----------------------------------------------------------------------------
+# 1. Load Data & Preprocessing
+# -----------------------------------------------------------------------------
+data = pd.read_csv("C:/Users/abdumiz/Downloads/fakereviewsdataset.csv")
 
 def clean_text(text):
     text = str(text).lower()
@@ -17,18 +23,46 @@ def clean_text(text):
 
 data["clean_text"] = data["text_"].apply(clean_text)
 
+def check_mid_sentence(text):
+    """FIX #4 from your friend: Ignore trailing quotes/brackets and digits."""
+    t = str(text).strip()
+    if not t:
+        return 0
+    t = t.rstrip("\"')]")
+    if not t:
+        return 0
+    last = t[-1]
+    if last in ".!?" or last.isdigit():
+        return 0
+    return 1
+
+# -----------------------------------------------------------------------------
+# 2. Extract Features (Includes New Spam Logic)
+# -----------------------------------------------------------------------------
 def extract_features(df):
-    raw   = df["text_"].astype(str)
+    raw = df["text_"].astype(str)
     clean = df["clean_text"]
 
     features = pd.DataFrame()
-
     features["text_length"] = clean.apply(len)
     features["word_count"] = clean.apply(lambda x: len(x.split()))
     features["exclamation_count"] = raw.apply(lambda x: x.count("!"))
     features["upper_ratio"] = raw.apply(
         lambda x: sum(1 for c in x if c.isupper()) / max(len(x), 1)
     )
+
+    # NEW: Specific Spam Trigger Words & Patterns
+    spam_keywords = [
+        "buy now", "click here", "limited time", "win prize",
+        "offer", "free", "spam"
+    ]
+    features["spam_keyword_count"] = clean.apply(
+        lambda x: sum(1 for kw in spam_keywords if kw in x)
+    )
+
+    # NEW: Heavy Exclamation or All-Caps Flag
+    features["is_excessive_caps"] = (features["upper_ratio"] > 0.4).astype(int)
+    features["is_excessive_exclamation"] = (features["exclamation_count"] >= 3).astype(int)
 
     repeated_phrases = [
         "i love the look and feel of this pillow",
@@ -42,6 +76,7 @@ def extract_features(df):
     for phrase in repeated_phrases:
         col = "has_" + phrase[:20].replace(" ", "_")
         features[col] = clean.apply(lambda x: int(phrase in x))
+
     positive_words = ["love", "great", "perfect", "excellent", "amazing", "best", "awesome"]
     features["positive_word_count"] = clean.apply(
         lambda x: sum(1 for w in positive_words if w in x.split())
@@ -52,10 +87,7 @@ def extract_features(df):
         (features["rating"] <= 2) & (features["positive_word_count"] >= 2)
     ).astype(int)
 
-    features["ends_mid_sentence"] = raw.apply(
-        lambda x: int(str(x).strip()[-1] not in ".!?\"'")
-    )
-
+    features["ends_mid_sentence"] = raw.apply(check_mid_sentence)
     features["boilerplate_phrase"] = clean.apply(
         lambda x: int("the only problem is" in x or "i will keep my" in x)
     )
@@ -64,110 +96,42 @@ def extract_features(df):
 
 feat_df = extract_features(data)
 
+# FIX #1 from your friend: CG (fake) = 0, OR (genuine) = 1
 data["label_enc"] = data["label"].map({"CG": 0, "OR": 1})
 
 X_text = data["clean_text"]
-y      = data["label_enc"]
+y = data["label_enc"]
 
+# -----------------------------------------------------------------------------
+# 3. Vectorization & Model Training
+# -----------------------------------------------------------------------------
 X_train_txt, X_test_txt, X_train_feat, X_test_feat, y_train, y_test = train_test_split(
-    X_text, feat_df, y,
-    test_size=0.2, random_state=42, stratify=y
+    X_text, feat_df, y, test_size=0.2, random_state=42, stratify=y
 )
 
-tfidf_word = TfidfVectorizer(
-    stop_words="english",
-    ngram_range=(1, 2),
-    max_features=500,
-    min_df=2
-)
-tfidf_char = TfidfVectorizer(
-    analyzer="char_wb",
-    ngram_range=(3, 5),
-    max_features=300,
-    min_df=2
-)
+tfidf_word = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=500, min_df=2)
+tfidf_char = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), max_features=300, min_df=2)
 
 X_train_w = tfidf_word.fit_transform(X_train_txt)
-X_test_w  = tfidf_word.transform(X_test_txt)
+X_test_w = tfidf_word.transform(X_test_txt)
 
 X_train_c = tfidf_char.fit_transform(X_train_txt)
-X_test_c  = tfidf_char.transform(X_test_txt)
+X_test_c = tfidf_char.transform(X_test_txt)
 
-X_train_f   = sp.csr_matrix(X_train_feat.values)
-X_test_f    = sp.csr_matrix(X_test_feat.values)
+X_train_f = sp.csr_matrix(X_train_feat.values)
+X_test_f = sp.csr_matrix(X_test_feat.values)
 
 X_train_all = hstack([X_train_w, X_train_c, X_train_f])
-X_test_all  = hstack([X_test_w,  X_test_c,  X_test_f])
+X_test_all = hstack([X_test_w, X_test_c, X_test_f])
 
-model = LogisticRegression(
-    max_iter=2000,
-    class_weight="balanced",
-    C=0.5,
-    solver="lbfgs"
-)
+model = LogisticRegression(max_iter=2000, class_weight="balanced", C=0.5, solver="lbfgs")
 model.fit(X_train_all, y_train)
 
-y_pred = model.predict(X_test_all)
+# -----------------------------------------------------------------------------
+# 4. Save Artifacts
+# -----------------------------------------------------------------------------
+joblib.dump(model, "model.pkl")
+joblib.dump(tfidf_word, "tfidf_word.pkl")
+joblib.dump(tfidf_char, "tfidf_char.pkl")
+print("Saved fixed model artifacts successfully with Spam Detection enabled!")
 
-print("=" * 55)
-print("              MODEL EVALUATION")
-print("=" * 55)
-print(f"  Accuracy : {accuracy_score(y_test, y_pred):.2%}\n")
-print("  Classification Report:")
-print(classification_report(y_test, y_pred, target_names=["Genuine (OR)", "Fake (CG)"]))
-cm = confusion_matrix(y_test, y_pred)
-print("  Confusion Matrix:")
-print(f"               Predicted")
-print(f"               OR    CG")
-print(f"  Actual  OR [ {cm[0][0]:>3}   {cm[0][1]:>3} ]")
-print(f"  Actual  CG [ {cm[1][0]:>3}   {cm[1][1]:>3} ]")
-
-def predict_reviews(reviews, ratings=None):
-    if ratings is None:
-        ratings = [3.0] * len(reviews)
-
-    df_test = pd.DataFrame({
-        "text_"     : reviews,
-        "clean_text": [clean_text(r) for r in reviews],
-        "rating"    : ratings
-    })
-    feats = extract_features(df_test)
-
-    tw = tfidf_word.transform(df_test["clean_text"])
-    tc = tfidf_char.transform(df_test["clean_text"])
-    tf = sp.csr_matrix(feats.values)
-    X  = hstack([tw, tc, tf])
-
-    preds = model.predict(X)
-    probs = model.predict_proba(X)
-
-    print("\n" + "=" * 55)
-    print("           CUSTOM REVIEW PREDICTIONS")
-    print("=" * 55)
-    for review, pred, prob in zip(reviews, preds, probs):
-        label      = "FAKE   " if pred == 1 else "GENUINE"
-        print(f"\n  Review : {review[:65]}")
-        print(f"  Result : {label} ")
-
-
-test_reviews = [
-    "Absolutely amazing product, works like a charm",
-    "Worst product ever do not buy",
-    "Buy now!!! Limited time offer!!!",
-    "Good quality and durable",
-    "Terrible experience very disappointed",
-    "Highly recommend this to everyone",
-    "Spam spam spam buy now",
-    "Not bad, does the job",
-    "Excellent product worth every penny",
-    "Fake fake fake fake",
-    "Decent product for the price",
-    "This is the best thing I have ever bought",
-    "Cheap quality broke in one day",
-    "Superb build and design",
-    "Click here to win prize now!!!",
-    "I love the look and feel of this pillow. The only problem is that it's not really a",
-    "We love this blanket. Very pretty.",
-]
-
-predict_reviews(test_reviews)
