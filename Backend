@@ -1,14 +1,11 @@
 import joblib
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import re
 from scipy.sparse import hstack
 import scipy.sparse as sp
-import seaborn as sns
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split
 
 # -----------------------------------------------------------------------------
@@ -16,15 +13,21 @@ from sklearn.model_selection import train_test_split
 # -----------------------------------------------------------------------------
 data = pd.read_csv("C:/Users/abdumiz/Downloads/fakereviewsdataset.csv")
 
+
 def clean_text(text):
     text = str(text).lower()
     text = re.sub(r"[^a-z\s]", "", text)
     return text.strip()
 
+
 data["clean_text"] = data["text_"].apply(clean_text)
 
+
 def check_mid_sentence(text):
-    """FIX #4 from your friend: Ignore trailing quotes/brackets and digits."""
+    """Friend's Fix #4: Ignore trailing quotes/brackets and digits so valid
+
+    sentence endings aren't flagged as cut-off mid-sentence.
+    """
     t = str(text).strip()
     if not t:
         return 0
@@ -36,8 +39,9 @@ def check_mid_sentence(text):
         return 0
     return 1
 
+
 # -----------------------------------------------------------------------------
-# 2. Extract Features (Includes New Spam Logic)
+# 2. Extract Features
 # -----------------------------------------------------------------------------
 def extract_features(df):
     raw = df["text_"].astype(str)
@@ -51,19 +55,25 @@ def extract_features(df):
         lambda x: sum(1 for c in x if c.isupper()) / max(len(x), 1)
     )
 
-    # NEW: Specific Spam Trigger Words & Patterns
+    # Spam Trigger Words & Patterns
     spam_keywords = [
-        "buy now", "click here", "limited time", "win prize",
-        "offer", "free", "spam"
+        "buy now",
+        "click here",
+        "limited time",
+        "win prize",
+        "offer",
+        "free",
+        "spam",
     ]
     features["spam_keyword_count"] = clean.apply(
         lambda x: sum(1 for kw in spam_keywords if kw in x)
     )
-
-    # NEW: Heavy Exclamation or All-Caps Flag
     features["is_excessive_caps"] = (features["upper_ratio"] > 0.4).astype(int)
-    features["is_excessive_exclamation"] = (features["exclamation_count"] >= 3).astype(int)
+    features["is_excessive_exclamation"] = (
+        features["exclamation_count"] >= 3
+    ).astype(int)
 
+    # Synthetic / Repeated Phrase Indicators
     repeated_phrases = [
         "i love the look and feel of this pillow",
         "the only problem is that its not really a",
@@ -77,12 +87,22 @@ def extract_features(df):
         col = "has_" + phrase[:20].replace(" ", "_")
         features[col] = clean.apply(lambda x: int(phrase in x))
 
-    positive_words = ["love", "great", "perfect", "excellent", "amazing", "best", "awesome"]
+    positive_words = [
+        "love",
+        "great",
+        "perfect",
+        "excellent",
+        "amazing",
+        "best",
+        "awesome",
+    ]
     features["positive_word_count"] = clean.apply(
         lambda x: sum(1 for w in positive_words if w in x.split())
     )
 
-    features["rating"] = pd.to_numeric(df["rating"], errors="coerce").fillna(3.0)
+    features["rating"] = pd.to_numeric(df["rating"], errors="coerce").fillna(
+        3.0
+    )
     features["sentiment_mismatch"] = (
         (features["rating"] <= 2) & (features["positive_word_count"] >= 2)
     ).astype(int)
@@ -94,23 +114,31 @@ def extract_features(df):
 
     return features
 
+
 feat_df = extract_features(data)
 
-# FIX #1 from your friend: CG (fake) = 0, OR (genuine) = 1
+# Friend's Fix #1: CG (fake) = 0, OR (genuine) = 1
 data["label_enc"] = data["label"].map({"CG": 0, "OR": 1})
 
 X_text = data["clean_text"]
 y = data["label_enc"]
 
 # -----------------------------------------------------------------------------
-# 3. Vectorization & Model Training
+# 3. Enhanced Vectorization & Model Training
 # -----------------------------------------------------------------------------
-X_train_txt, X_test_txt, X_train_feat, X_test_feat, y_train, y_test = train_test_split(
-    X_text, feat_df, y, test_size=0.2, random_state=42, stratify=y
+X_train_txt, X_test_txt, X_train_feat, X_test_feat, y_train, y_test = (
+    train_test_split(
+        X_text, feat_df, y, test_size=0.2, random_state=42, stratify=y
+    )
 )
 
-tfidf_word = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), max_features=500, min_df=2)
-tfidf_char = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), max_features=300, min_df=2)
+# Increased max_features to capture more subtle vocabulary patterns
+tfidf_word = TfidfVectorizer(
+    stop_words="english", ngram_range=(1, 2), max_features=2500, min_df=2
+)
+tfidf_char = TfidfVectorizer(
+    analyzer="char_wb", ngram_range=(3, 5), max_features=1500, min_df=2
+)
 
 X_train_w = tfidf_word.fit_transform(X_train_txt)
 X_test_w = tfidf_word.transform(X_test_txt)
@@ -124,14 +152,18 @@ X_test_f = sp.csr_matrix(X_test_feat.values)
 X_train_all = hstack([X_train_w, X_train_c, X_train_f])
 X_test_all = hstack([X_test_w, X_test_c, X_test_f])
 
-model = LogisticRegression(max_iter=2000, class_weight="balanced", C=0.5, solver="lbfgs")
+model = LogisticRegression(
+    max_iter=2000, class_weight="balanced", C=0.5, solver="lbfgs"
+)
 model.fit(X_train_all, y_train)
 
 # -----------------------------------------------------------------------------
-# 4. Save Artifacts
+# 4. Export Model Artifacts
 # -----------------------------------------------------------------------------
 joblib.dump(model, "model.pkl")
 joblib.dump(tfidf_word, "tfidf_word.pkl")
 joblib.dump(tfidf_char, "tfidf_char.pkl")
-print("Saved fixed model artifacts successfully with Spam Detection enabled!")
+print(
+    "✅ Model training complete. Artifacts saved: model.pkl, tfidf_word.pkl, tfidf_char.pkl"
+)
 
