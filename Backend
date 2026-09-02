@@ -1,4 +1,6 @@
+
 import joblib
+import nltk
 import numpy as np
 import pandas as pd
 import re
@@ -6,28 +8,46 @@ from scipy.sparse import hstack
 import scipy.sparse as sp
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import MultinomialNB
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    roc_auc_score,
+    classification_report,
+)
+
+# -----------------------------------------------------------------------------
+# 0. NLTK setup (for lemmatization)
+# -----------------------------------------------------------------------------
+nltk.download("wordnet", quiet=True)
+nltk.download("omw-1.4", quiet=True)
+from nltk.stem import WordNetLemmatizer
+
+lemmatizer = WordNetLemmatizer()
 
 # -----------------------------------------------------------------------------
 # 1. Load Data & Preprocessing
 # -----------------------------------------------------------------------------
-data = pd.read_csv("C:/Users/abdumiz/Downloads/fakereviewsdataset.csv")
+data = pd.read_csv("C:/Users/abdumiz/Downloads/fakereviewsdataset.csv", engine="python", on_bad_lines="warn")
 
+# Handling missing text: NaN reviews become empty strings
+data["text_"] = data["text_"].fillna("").astype(str)
 
 def clean_text(text):
     text = str(text).lower()
-    text = re.sub(r"[^a-z\s]", "", text)
-    return text.strip()
-
+    text = re.sub(r"http\S+|www\.\S+", " ", text)  # strip URLs
+    text = re.sub(r"[^a-z\s]", "", text)  # strip punctuation/digits/emoji
+    tokens = text.split()
+    tokens = [lemmatizer.lemmatize(tok) for tok in tokens]
+    return " ".join(tokens).strip()
 
 data["clean_text"] = data["text_"].apply(clean_text)
 
-
 def check_mid_sentence(text):
-    """Friend's Fix #4: Ignore trailing quotes/brackets and digits so valid
-
-    sentence endings aren't flagged as cut-off mid-sentence.
-    """
     t = str(text).strip()
     if not t:
         return 0
@@ -38,7 +58,6 @@ def check_mid_sentence(text):
     if last in ".!?" or last.isdigit():
         return 0
     return 1
-
 
 # -----------------------------------------------------------------------------
 # 2. Extract Features
@@ -55,7 +74,6 @@ def extract_features(df):
         lambda x: sum(1 for c in x if c.isupper()) / max(len(x), 1)
     )
 
-    # Spam Trigger Words & Patterns
     spam_keywords = [
         "buy now",
         "click here",
@@ -73,7 +91,6 @@ def extract_features(df):
         features["exclamation_count"] >= 3
     ).astype(int)
 
-    # Synthetic / Repeated Phrase Indicators
     repeated_phrases = [
         "i love the look and feel of this pillow",
         "the only problem is that its not really a",
@@ -100,9 +117,7 @@ def extract_features(df):
         lambda x: sum(1 for w in positive_words if w in x.split())
     )
 
-    features["rating"] = pd.to_numeric(df["rating"], errors="coerce").fillna(
-        3.0
-    )
+    features["rating"] = pd.to_numeric(df["rating"], errors="coerce").fillna(3.0)
     features["sentiment_mismatch"] = (
         (features["rating"] <= 2) & (features["positive_word_count"] >= 2)
     ).astype(int)
@@ -114,10 +129,9 @@ def extract_features(df):
 
     return features
 
-
 feat_df = extract_features(data)
 
-# Friend's Fix #1: CG (fake) = 0, OR (genuine) = 1
+# CG (fake) = 0, OR (genuine) = 1
 data["label_enc"] = data["label"].map({"CG": 0, "OR": 1})
 
 X_text = data["clean_text"]
@@ -132,7 +146,6 @@ X_train_txt, X_test_txt, X_train_feat, X_test_feat, y_train, y_test = (
     )
 )
 
-# Increased max_features to capture more subtle vocabulary patterns
 tfidf_word = TfidfVectorizer(
     stop_words="english", ngram_range=(1, 2), max_features=2500, min_df=2
 )
@@ -149,21 +162,102 @@ X_test_c = tfidf_char.transform(X_test_txt)
 X_train_f = sp.csr_matrix(X_train_feat.values)
 X_test_f = sp.csr_matrix(X_test_feat.values)
 
-X_train_all = hstack([X_train_w, X_train_c, X_train_f])
-X_test_all = hstack([X_test_w, X_test_c, X_test_f])
+X_train_all = hstack([X_train_w, X_train_c, X_train_f]).tocsr()
+X_test_all = hstack([X_test_w, X_test_c, X_test_f]).tocsr()
 
 model = LogisticRegression(
-    max_iter=2000, class_weight="balanced", C=0.5, solver="lbfgs"
+    max_iter=5000, class_weight="balanced", C=0.5, solver="lbfgs"
 )
 model.fit(X_train_all, y_train)
 
+nb_model = MultinomialNB()
+nb_model.fit(X_train_all, y_train)
+
 # -----------------------------------------------------------------------------
-# 4. Export Model Artifacts
+# 4. Model Evaluation & Comparison
+# -----------------------------------------------------------------------------
+def evaluate_model(name, clf, X_test, y_test):
+    y_pred = clf.predict(X_test)
+    y_proba = clf.predict_proba(X_test)[:, 1]
+
+    acc = accuracy_score(y_test, y_pred)
+    prec = precision_score(y_test, y_pred)
+    rec = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    auc = roc_auc_score(y_test, y_proba)
+    cm = confusion_matrix(y_test, y_pred)
+
+    print(f"\n--- {name} ---")
+    print(f"Accuracy : {acc:.4f}")
+    print(f"Precision: {prec:.4f}")
+    print(f"Recall   : {rec:.4f}")
+    print(f"F1-score : {f1:.4f}")
+    print(f"ROC-AUC  : {auc:.4f}")
+    print("Confusion Matrix (rows=actual, cols=predicted) [CG, OR]:")
+    print(cm)
+    print(classification_report(y_test, y_pred, target_names=["CG (fake)", "OR (genuine)"]))
+
+    return {"name": name, "accuracy": acc, "precision": prec, "recall": rec, "f1": f1, "auc": auc}
+
+print("=" * 70)
+print("MODEL EVALUATION & COMPARISON")
+print("=" * 70)
+results_lr = evaluate_model("Logistic Regression", model, X_test_all, y_test)
+results_nb = evaluate_model("Multinomial Naive Bayes", nb_model, X_test_all, y_test)
+
+print("\n--- Comparison Summary ---")
+comparison_df = pd.DataFrame([results_lr, results_nb]).set_index("name")
+print(comparison_df.round(4))
+
+best_model_name = comparison_df["f1"].idxmax()
+print(f"\nBest performing model by F1-score: {best_model_name}")
+
+# -----------------------------------------------------------------------------
+# 5. Explainable AI (XAI) — LIME token-level explanations
+# -----------------------------------------------------------------------------
+from lime.lime_text import LimeTextExplainer
+
+explainer = LimeTextExplainer(class_names=["CG (fake)", "OR (genuine)"])
+
+def build_features_for_text(raw_text, rating=3.0):
+    df_single = pd.DataFrame({"text_": raw_text})
+    df_single["clean_text"] = df_single["text_"].apply(clean_text)
+    df_single["rating"] = rating
+    feats = extract_features(df_single)
+    tw = tfidf_word.transform(df_single["clean_text"])
+    tc = tfidf_char.transform(df_single["clean_text"])
+    tf = sp.csr_matrix(feats.values)
+    return hstack([tw, tc, tf]).tocsr()
+
+def lime_predict_fn(text_list):
+    X = build_features_for_text(list(text_list), rating=3.0)
+    return model.predict_proba(X)
+
+print("\n" + "=" * 70)
+print("EXPLAINABLE AI (XAI) — sample LIME explanations")
+print("=" * 70)
+
+sample_reviews = X_test_txt.reset_index(drop=True).head(3)
+for i, review in enumerate(sample_reviews):
+    if not review.strip():
+        continue
+    print(f"\nSample #{i + 1}: \"{review}\"")
+    exp = explainer.explain_instance(
+        review, lime_predict_fn, num_features=6, labels=(0, 1)
+    )
+    print("Top contributing tokens (positive weight -> pushes toward 'OR/genuine',")
+    print("negative weight -> pushes toward 'CG/fake'):")
+    for token, weight in exp.as_list(label=1):
+        print(f"  {token:20s} {weight:+.4f}")
+
+# -----------------------------------------------------------------------------
+# 6. Export Model Artifacts
 # -----------------------------------------------------------------------------
 joblib.dump(model, "model.pkl")
+joblib.dump(nb_model, "nb_model.pkl")
 joblib.dump(tfidf_word, "tfidf_word.pkl")
 joblib.dump(tfidf_char, "tfidf_char.pkl")
 print(
-    "✅ Model training complete. Artifacts saved: model.pkl, tfidf_word.pkl, tfidf_char.pkl"
+    "\n✅ Model training complete. Artifacts saved: model.pkl, nb_model.pkl, "
+    "tfidf_word.pkl, tfidf_char.pkl"
 )
-
